@@ -8,7 +8,15 @@ export GOCACHE = $(CURDIR)/_build/cache
 	dh $@
 
 override_dh_auto_build:
-	go build -o proxs3d ./cmd/proxs3d
+	go build -ldflags="-s -w" -o proxs3d ./cmd/proxs3d
+
+override_dh_dwz:
+	# Go binaries don't work with dwz
+	true
+
+override_dh_strip:
+	# Already stripped via -ldflags="-s -w"
+	true
 
 override_dh_auto_install:
 	# Go daemon
