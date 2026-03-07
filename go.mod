@@ -1,4 +1,4 @@
-module github.com/daveio/proxs3
+module github.com/sol1/proxs3
 
 go 1.24
 

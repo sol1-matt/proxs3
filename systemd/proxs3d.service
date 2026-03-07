@@ -1,14 +1,16 @@
 [Unit]
 Description=ProxS3 Storage Daemon
-Documentation=https://github.com/daveio/proxs3
-After=network-online.target
+Documentation=https://github.com/sol1/proxs3
+After=network-online.target pve-cluster.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/proxs3d -config /etc/proxs3/proxs3d.json
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
+PIDFile=/run/proxs3d.pid
 RuntimeDirectory=proxs3
 CacheDirectory=proxs3
 
@@ -16,7 +18,8 @@ CacheDirectory=proxs3
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/cache/proxs3 /run/proxs3d.sock
+ReadWritePaths=/var/cache/proxs3 /run
+ReadOnlyPaths=/etc/pve /etc/proxs3
 PrivateTmp=yes
 
 [Install]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -12,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daveio/proxs3/internal/cache"
-	"github.com/daveio/proxs3/internal/config"
-	"github.com/daveio/proxs3/internal/s3client"
+	"github.com/sol1/proxs3/internal/cache"
+	"github.com/sol1/proxs3/internal/config"
+	"github.com/sol1/proxs3/internal/s3client"
 )
 
 // Server is the Unix socket API server that the Perl plugin communicates with.
@@ -24,6 +25,7 @@ type Server struct {
 	cache    *cache.FileCache
 	health   map[string]bool
 	healthMu sync.RWMutex
+	clientMu sync.RWMutex
 	listener net.Listener
 	server   *http.Server
 }
@@ -35,23 +37,63 @@ func New(cfg *config.DaemonConfig) (*Server, error) {
 		return nil, err
 	}
 
+	s := &Server{
+		cfg:     cfg,
+		clients: make(map[string]*s3client.Client),
+		cache:   fc,
+		health:  make(map[string]bool),
+	}
+
+	if err := s.initClients(cfg); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (s *Server) initClients(cfg *config.DaemonConfig) error {
 	clients := make(map[string]*s3client.Client)
 	health := make(map[string]bool)
+
 	for _, sc := range cfg.Storages {
 		c, err := s3client.New(sc, cfg.Proxy)
 		if err != nil {
-			return nil, fmt.Errorf("creating client for %s: %w", sc.StorageID, err)
+			return fmt.Errorf("creating client for %s: %w", sc.StorageID, err)
 		}
 		clients[sc.StorageID] = c
 		health[sc.StorageID] = false
 	}
 
-	return &Server{
-		cfg:     cfg,
-		clients: clients,
-		cache:   fc,
-		health:  health,
-	}, nil
+	s.clientMu.Lock()
+	s.clients = clients
+	s.clientMu.Unlock()
+
+	s.healthMu.Lock()
+	s.health = health
+	s.healthMu.Unlock()
+
+	return nil
+}
+
+// Reload re-reads config and reinitializes clients for added/changed storages.
+func (s *Server) Reload(cfg *config.DaemonConfig) error {
+	if err := s.initClients(cfg); err != nil {
+		return err
+	}
+	s.cfg = cfg
+
+	// Update cache if dir changed
+	if cfg.CacheDir != s.cfg.CacheDir || cfg.CacheMaxMB != s.cfg.CacheMaxMB {
+		fc, err := cache.New(cfg.CacheDir, cfg.CacheMaxMB)
+		if err != nil {
+			return fmt.Errorf("reinitializing cache: %w", err)
+		}
+		s.cache = fc
+	}
+
+	// Run immediate health check
+	go s.checkAllHealth()
+	return nil
 }
 
 // Start begins listening on the Unix socket and serving requests.
@@ -62,7 +104,10 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", s.cfg.SocketPath, err)
 	}
-	os.Chmod(s.cfg.SocketPath, 0660)
+	if err := os.Chmod(s.cfg.SocketPath, 0660); err != nil {
+		ln.Close()
+		return fmt.Errorf("chmod socket: %w", err)
+	}
 	s.listener = ln
 
 	mux := http.NewServeMux()
@@ -88,11 +133,11 @@ func (s *Server) Stop() error {
 }
 
 func (s *Server) healthLoop() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
 	// Initial check
 	s.checkAllHealth()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
 	for range ticker.C {
 		s.checkAllHealth()
@@ -100,16 +145,31 @@ func (s *Server) healthLoop() {
 }
 
 func (s *Server) checkAllHealth() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	s.clientMu.RLock()
+	clients := s.clients
+	s.clientMu.RUnlock()
+
+	results := make(map[string]bool)
+	for id, c := range clients {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := c.HeadBucket(ctx)
+		cancel()
+		results[id] = (err == nil)
+		if err != nil {
+			log.Printf("health check failed for %s: %v", id, err)
+		}
+	}
 
 	s.healthMu.Lock()
-	defer s.healthMu.Unlock()
+	s.health = results
+	s.healthMu.Unlock()
+}
 
-	for id, c := range s.clients {
-		err := c.HeadBucket(ctx)
-		s.health[id] = (err == nil)
-	}
+func (s *Server) getClient(storageID string) (*s3client.Client, bool) {
+	s.clientMu.RLock()
+	defer s.clientMu.RUnlock()
+	c, ok := s.clients[storageID]
+	return c, ok
 }
 
 // --- HTTP Handlers ---
@@ -127,6 +187,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	storageID := r.URL.Query().Get("storage")
 	if storageID == "" {
 		http.Error(w, "missing storage parameter", http.StatusBadRequest)
+		return
+	}
+
+	_, known := s.getClient(storageID)
+	if !known {
+		http.Error(w, "unknown storage", http.StatusNotFound)
 		return
 	}
 
@@ -159,7 +225,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	storageID := r.URL.Query().Get("storage")
 	content := r.URL.Query().Get("content")
 
-	client, ok := s.clients[storageID]
+	client, ok := s.getClient(storageID)
 	if !ok {
 		http.Error(w, "unknown storage", http.StatusNotFound)
 		return
@@ -195,28 +261,39 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	storageID := r.URL.Query().Get("storage")
 	key := r.URL.Query().Get("key")
 
-	client, ok := s.clients[storageID]
+	client, ok := s.getClient(storageID)
 	if !ok {
 		http.Error(w, "unknown storage", http.StatusNotFound)
 		return
 	}
 
-	// Check cache first
+	// Check if we have a valid (non-stale) cache entry
 	if cached := s.cache.Path(storageID, key); cached != "" {
-		writeJSON(w, map[string]string{"path": cached})
-		return
+		// Validate against S3 metadata (HeadObject is cheap)
+		info, err := client.HeadObject(r.Context(), key)
+		if err == nil && !s.cache.IsStale(storageID, key, info.ETag, info.LastModified) {
+			writeJSON(w, map[string]string{"path": cached})
+			return
+		}
+		// Stale or head failed — invalidate and re-download
+		s.cache.Invalidate(storageID, key)
 	}
 
 	// Download from S3
-	body, _, err := client.GetObject(r.Context(), key)
+	result, err := client.GetObject(r.Context(), key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer body.Close()
+	defer result.Body.Close()
 
-	// Store in cache
-	localPath, err := s.cache.Store(storageID, key, body)
+	// Store in cache with metadata
+	meta := cache.FileMeta{
+		ETag:         result.ETag,
+		LastModified: result.LastModified,
+		Size:         result.Size,
+	}
+	localPath, err := s.cache.Store(storageID, key, result.Body, meta)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -230,7 +307,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	localPath := r.URL.Query().Get("path")
 
-	client, ok := s.clients[storageID]
+	client, ok := s.getClient(storageID)
 	if !ok {
 		http.Error(w, "unknown storage", http.StatusNotFound)
 		return
@@ -254,6 +331,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cache the uploaded file with current metadata
+	uploadMeta := cache.FileMeta{
+		Size:         info.Size(),
+		LastModified: time.Now(),
+	}
+	s.cache.Link(storageID, key, localPath, uploadMeta)
+
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -261,7 +345,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	storageID := r.URL.Query().Get("storage")
 	key := r.URL.Query().Get("key")
 
-	client, ok := s.clients[storageID]
+	client, ok := s.getClient(storageID)
 	if !ok {
 		http.Error(w, "unknown storage", http.StatusNotFound)
 		return
@@ -279,16 +363,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePath(w http.ResponseWriter, r *http.Request) {
-	storageID := r.URL.Query().Get("storage")
-	key := r.URL.Query().Get("key")
-
-	// If cached, return cache path; otherwise download first
-	if cached := s.cache.Path(storageID, key); cached != "" {
-		writeJSON(w, map[string]string{"path": cached})
-		return
-	}
-
-	// Trigger download
+	// Path always validates and downloads if needed — delegates to download handler
 	s.handleDownload(w, r)
 }
 

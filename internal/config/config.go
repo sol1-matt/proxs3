@@ -1,10 +1,12 @@
 package config
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -12,21 +14,19 @@ const (
 	DefaultCacheDir      = "/var/cache/proxs3"
 	DefaultCacheMaxMB    = 4096
 	DefaultCredentialDir = "/etc/pve/priv/proxs3"
+	DefaultStorageCfg    = "/etc/pve/storage.cfg"
 )
 
-// StorageConfig represents the configuration for a single S3-backed storage.
+// StorageConfig represents a discovered S3 storage from storage.cfg.
 type StorageConfig struct {
-	StorageID string `json:"storage_id"`
-	Bucket    string `json:"bucket"`
-	Endpoint  string `json:"endpoint"`
-	Region    string `json:"region"`
-	UseSSL    bool   `json:"use_ssl"`
-	PathStyle bool   `json:"path_style"`
-
-	// Credentials are loaded separately from the credential dir,
-	// not stored in this config (which may live in shared storage).
-	AccessKey string `json:"-"`
-	SecretKey string `json:"-"`
+	StorageID string
+	Bucket    string
+	Endpoint  string
+	Region    string
+	UseSSL    bool
+	PathStyle bool
+	AccessKey string
+	SecretKey string
 }
 
 // Credential holds S3 access credentials, loaded from per-storage files.
@@ -43,13 +43,17 @@ type ProxyConfig struct {
 }
 
 // DaemonConfig is the top-level configuration for proxs3d.
+// Per-storage config is read from storage.cfg, not from here.
 type DaemonConfig struct {
-	SocketPath    string          `json:"socket_path"`
-	CacheDir      string          `json:"cache_dir"`
-	CacheMaxMB    int64           `json:"cache_max_mb"`
-	CredentialDir string          `json:"credential_dir"`
-	Proxy         ProxyConfig     `json:"proxy"`
-	Storages      []StorageConfig `json:"storages"`
+	SocketPath    string      `json:"socket_path"`
+	CacheDir      string      `json:"cache_dir"`
+	CacheMaxMB    int64       `json:"cache_max_mb"`
+	CredentialDir string      `json:"credential_dir"`
+	StorageCfg    string      `json:"storage_cfg"`
+	Proxy         ProxyConfig `json:"proxy"`
+
+	// Populated at load time from storage.cfg + credential files
+	Storages []StorageConfig `json:"-"`
 }
 
 func DefaultDaemonConfig() *DaemonConfig {
@@ -58,9 +62,12 @@ func DefaultDaemonConfig() *DaemonConfig {
 		CacheDir:      DefaultCacheDir,
 		CacheMaxMB:    DefaultCacheMaxMB,
 		CredentialDir: DefaultCredentialDir,
+		StorageCfg:    DefaultStorageCfg,
 	}
 }
 
+// LoadDaemonConfig reads the daemon config, then discovers S3 storages
+// from storage.cfg and loads their credentials.
 func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -71,21 +78,118 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 
-	// Load credentials for each storage from the credential dir
-	for i := range cfg.Storages {
-		cred, err := LoadCredential(cfg.CredentialDir, cfg.Storages[i].StorageID)
-		if err != nil {
-			return nil, fmt.Errorf("loading credentials for %s: %w", cfg.Storages[i].StorageID, err)
-		}
-		cfg.Storages[i].AccessKey = cred.AccessKey
-		cfg.Storages[i].SecretKey = cred.SecretKey
+	if err := cfg.DiscoverStorages(); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
 }
 
+// DiscoverStorages reads storage.cfg to find all s3-type storages,
+// then loads credentials for each from the credential dir.
+func (cfg *DaemonConfig) DiscoverStorages() error {
+	storages, err := ParseStorageCfg(cfg.StorageCfg)
+	if err != nil {
+		return fmt.Errorf("parsing storage.cfg: %w", err)
+	}
+
+	for i := range storages {
+		cred, err := LoadCredential(cfg.CredentialDir, storages[i].StorageID)
+		if err != nil {
+			return fmt.Errorf("loading credentials for %s: %w", storages[i].StorageID, err)
+		}
+		storages[i].AccessKey = cred.AccessKey
+		storages[i].SecretKey = cred.SecretKey
+	}
+
+	cfg.Storages = storages
+	return nil
+}
+
+// ParseStorageCfg reads a PVE storage.cfg file and extracts all
+// sections with type "s3".
+func ParseStorageCfg(path string) ([]StorageConfig, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var storages []StorageConfig
+	var current *StorageConfig
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		raw := scanner.Text()
+		line := strings.TrimSpace(raw)
+
+		// Skip comments and empty lines
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Property lines start with whitespace; section headers don't
+		isProperty := strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, " ")
+
+		// New section: "type: name"
+		if !isProperty && strings.Contains(line, ":") {
+			// Save previous section if it was s3
+			if current != nil {
+				storages = append(storages, *current)
+			}
+			current = nil
+
+			parts := strings.SplitN(line, ":", 2)
+			stype := strings.TrimSpace(parts[0])
+			sname := strings.TrimSpace(parts[1])
+
+			if stype == "s3" {
+				current = &StorageConfig{
+					StorageID: sname,
+					UseSSL:    true, // default
+					Region:    "us-east-1",
+				}
+			}
+			continue
+		}
+
+		// Property line within a section
+		if isProperty && current != nil {
+			parts := strings.SplitN(line, " ", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			switch key {
+			case "endpoint":
+				current.Endpoint = val
+			case "bucket":
+				current.Bucket = val
+			case "region":
+				current.Region = val
+			case "use-ssl":
+				current.UseSSL = (val == "1" || val == "yes" || val == "true")
+			case "path-style":
+				current.PathStyle = (val == "1" || val == "yes" || val == "true")
+			}
+		}
+	}
+
+	// Don't forget the last section
+	if current != nil {
+		storages = append(storages, *current)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+
+	return storages, nil
+}
+
 // LoadCredential reads credentials from a per-storage JSON file.
-// File path: <credentialDir>/<storageID>.json
 func LoadCredential(credentialDir, storageID string) (*Credential, error) {
 	path := filepath.Join(credentialDir, storageID+".json")
 	data, err := os.ReadFile(path)

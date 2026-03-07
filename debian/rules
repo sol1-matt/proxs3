@@ -30,8 +30,7 @@ override_dh_auto_install:
 	install -d -m 0755 $(CURDIR)/debian/proxs3/var/cache/proxs3
 
 override_dh_auto_test:
-	# Tests require S3 connectivity, skip in packaging
-	true
+	go test ./...
 
 override_dh_auto_clean:
 	rm -f proxs3d

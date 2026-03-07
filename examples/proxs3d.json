@@ -3,19 +3,10 @@
     "cache_dir": "/var/cache/proxs3",
     "cache_max_mb": 4096,
     "credential_dir": "/etc/pve/priv/proxs3",
+    "storage_cfg": "/etc/pve/storage.cfg",
     "proxy": {
         "https_proxy": "",
         "http_proxy": "",
         "no_proxy": ""
-    },
-    "storages": [
-        {
-            "storage_id": "s3-shared",
-            "bucket": "proxmox-storage",
-            "endpoint": "s3.amazonaws.com",
-            "region": "us-east-1",
-            "use_ssl": true,
-            "path_style": false
-        }
-    ]
+    }
 }

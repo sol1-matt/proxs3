@@ -5,12 +5,13 @@ use warnings;
 
 use base qw(PVE::Storage::Plugin);
 
-use HTTP::Tiny;
 use JSON;
 use File::Basename;
 use IO::Socket::UNIX;
+use POSIX qw(SIGTERM SIGHUP);
 
 my $SOCKET_PATH = '/run/proxs3d.sock';
+my $CRED_DIR = '/etc/pve/priv/proxs3';
 
 # Register as storage type 's3'
 sub type {
@@ -43,11 +44,11 @@ sub properties {
             optional    => 1,
         },
         'access-key' => {
-            description => "S3 access key ID (stored in /etc/pve/priv/proxs3/<storeid>.json, not in storage.cfg)",
+            description => "S3 access key ID",
             type        => 'string',
         },
         'secret-key' => {
-            description => "S3 secret access key (stored in /etc/pve/priv/proxs3/<storeid>.json, not in storage.cfg)",
+            description => "S3 secret access key",
             type        => 'string',
         },
         'use-ssl' => {
@@ -79,7 +80,7 @@ sub options {
     };
 }
 
-my $CRED_DIR = '/etc/pve/priv/proxs3';
+# --- Credential management (stored in /etc/pve/priv/proxs3/) ---
 
 sub _cred_path {
     my ($storeid) = @_;
@@ -115,17 +116,31 @@ sub _read_credentials {
     return decode_json($data);
 }
 
+# Signal the daemon to reload its config (re-reads storage.cfg)
+sub _reload_daemon {
+    my $pidfile = '/run/proxs3d.pid';
+    if (open(my $fh, '<', $pidfile)) {
+        my $pid = <$fh>;
+        close $fh;
+        chomp $pid;
+        kill SIGHUP, $pid if $pid;
+    }
+    # If no pidfile, try systemctl
+    system('systemctl', 'reload', 'proxs3d') == 0 or
+        warn "Could not reload proxs3d daemon\n";
+}
+
 # --- Helper: talk to proxs3d via Unix socket ---
 
 sub _daemon_request {
     my ($path, $params) = @_;
 
     my $query = join('&', map { "$_=" . _uri_encode($params->{$_}) } keys %$params);
-    my $url = "http://localhost${path}?${query}";
 
     my $sock = IO::Socket::UNIX->new(
-        Peer => $SOCKET_PATH,
-        Type => SOCK_STREAM,
+        Peer    => $SOCKET_PATH,
+        Type    => SOCK_STREAM,
+        Timeout => 10,
     ) or die "Cannot connect to proxs3d at $SOCKET_PATH: $!\n";
 
     my $req = "GET ${path}?${query} HTTP/1.0\r\nHost: localhost\r\n\r\n";
@@ -139,6 +154,15 @@ sub _daemon_request {
 
     # Parse HTTP response: skip headers, get body
     my ($headers, $body) = split(/\r?\n\r?\n/, $response, 2);
+
+    # Check for HTTP errors
+    if ($headers && $headers =~ m{^HTTP/\S+\s+(\d+)}) {
+        my $code = $1;
+        if ($code >= 400) {
+            die "proxs3d error $code: $body\n";
+        }
+    }
+
     return decode_json($body // '{}');
 }
 
@@ -148,7 +172,7 @@ sub _uri_encode {
     return $str;
 }
 
-# --- Plugin Interface Methods ---
+# --- Plugin Lifecycle Hooks ---
 
 sub on_add_hook {
     my ($class, $storeid, $scfg, %param) = @_;
@@ -159,19 +183,20 @@ sub on_add_hook {
         or die "secret-key is required\n";
 
     _write_credentials($storeid, $access_key, $secret_key);
+    _reload_daemon();
     return;
 }
 
 sub on_update_hook {
     my ($class, $storeid, $scfg, %param) = @_;
 
-    # Update credentials if provided
     my $access_key = delete $scfg->{'access-key'};
     my $secret_key = delete $scfg->{'secret-key'};
 
     if ($access_key && $secret_key) {
         _write_credentials($storeid, $access_key, $secret_key);
     }
+    _reload_daemon();
     return;
 }
 
@@ -180,19 +205,24 @@ sub on_delete_hook {
 
     my $path = _cred_path($storeid);
     unlink $path if -f $path;
+    _reload_daemon();
     return;
 }
+
+# --- Plugin Interface Methods ---
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
 
-    # Ensure the daemon is running and the storage is reachable
+    # Be lenient on activation — the daemon may still be starting up
+    # or the S3 endpoint may be temporarily unreachable. Proxmox will
+    # show the storage as unavailable via status() if it's offline.
     eval {
-        my $status = _daemon_request('/v1/status', { storage => $storeid });
-        die "storage $storeid is offline\n" unless $status->{online};
+        _daemon_request('/v1/status', { storage => $storeid });
     };
     if ($@) {
-        die "Failed to activate S3 storage '$storeid': $@\n";
+        warn "proxs3: storage '$storeid' activation warning: $@";
+        # Don't die — let Proxmox proceed and show degraded status
     }
     return 1;
 }
@@ -207,7 +237,7 @@ sub status {
 
     my $res = eval { _daemon_request('/v1/status', { storage => $storeid }) };
     if ($@) {
-        return ($res->{total} // 0, $res->{available} // 0, 0, 0);
+        return (0, 0, 0, 0);
     }
 
     my $total = $res->{total} // 0;
@@ -226,7 +256,7 @@ sub list_volumes {
         my $list = eval {
             _daemon_request('/v1/list', { storage => $storeid, content => $ct });
         };
-        next if $@ || !$list;
+        next if $@ || !$list || ref($list) ne 'ARRAY';
 
         for my $vol (@$list) {
             push @volumes, {
@@ -243,14 +273,7 @@ sub list_volumes {
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
-    # volname is like "iso/debian-12.iso"
-    my $content = 'iso';
-    my $filename = $volname;
-    if ($volname =~ m|^([^/]+)/(.+)$|) {
-        $content  = $1;
-        $filename = $2;
-    }
-
+    my ($content, $filename) = _parse_volname($volname);
     my $prefix = _content_to_prefix($content);
     my $key = "${prefix}${filename}";
 
@@ -264,15 +287,26 @@ sub path {
     return ($res->{path}, $content, 'raw');
 }
 
-sub _content_to_prefix {
-    my ($content) = @_;
-    my %map = (
-        iso      => 'template/iso/',
-        vztmpl   => 'template/cache/',
-        snippets => 'snippets/',
-        backup   => 'dump/',
-    );
-    return $map{$content} // "${content}/";
+# Upload: called by Proxmox when user uploads an ISO/template via UI or API
+sub upload {
+    my ($class, $storeid, $scfg, $volname, $tmpfile) = @_;
+
+    my ($content, $filename) = _parse_volname($volname);
+    my $prefix = _content_to_prefix($content);
+    my $key = "${prefix}${filename}";
+
+    my $res = eval {
+        _daemon_request('/v1/upload', {
+            storage => $storeid,
+            key     => $key,
+            path    => $tmpfile,
+        });
+    };
+    if ($@) {
+        die "Failed to upload $volname: $@\n";
+    }
+
+    return;
 }
 
 sub clone_image {
@@ -286,18 +320,39 @@ sub alloc_image {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
 
+    my ($content, $filename) = _parse_volname($volname);
+    my $prefix = _content_to_prefix($content);
+    my $key = "${prefix}${filename}";
+
+    eval {
+        _daemon_request('/v1/delete', { storage => $storeid, key => $key });
+    };
+    warn "proxs3: failed to delete $volname: $@\n" if $@;
+    return;
+}
+
+# --- Helpers ---
+
+sub _parse_volname {
+    my ($volname) = @_;
     my $content = 'iso';
     my $filename = $volname;
     if ($volname =~ m|^([^/]+)/(.+)$|) {
         $content  = $1;
         $filename = $2;
     }
+    return ($content, $filename);
+}
 
-    my $prefix = _content_to_prefix($content);
-    my $key = "${prefix}${filename}";
-
-    _daemon_request('/v1/delete', { storage => $storeid, key => $key });
-    return;
+sub _content_to_prefix {
+    my ($content) = @_;
+    my %map = (
+        iso      => 'template/iso/',
+        vztmpl   => 'template/cache/',
+        snippets => 'snippets/',
+        backup   => 'dump/',
+    );
+    return $map{$content} // "${content}/";
 }
 
 1;
