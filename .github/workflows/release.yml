@@ -20,7 +20,7 @@ jobs:
           go-version: '1.24'
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y debhelper devscripts
+        run: sudo apt-get update && sudo apt-get install -y debhelper devscripts build-essential
 
       - name: Extract version from tag
         id: version
@@ -31,7 +31,7 @@ jobs:
           sed -i "s/^proxs3 (.*/proxs3 (${{ steps.version.outputs.version }}-1) unstable; urgency=medium/" debian/changelog
 
       - name: Build .deb package
-        run: dpkg-buildpackage -us -uc -b
+        run: dpkg-buildpackage -us -uc -b -d
 
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
