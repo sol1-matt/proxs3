@@ -30,6 +30,10 @@ override_dh_auto_install:
 	install -D -m 0644 systemd/proxs3d.service \
 		$(CURDIR)/debian/proxs3/lib/systemd/system/proxs3d.service
 
+	# Web UI panel
+	install -D -m 0644 js/s3storage.js \
+		$(CURDIR)/debian/proxs3/usr/share/pve-manager/js/s3storage.js
+
 	# Example config
 	install -D -m 0640 examples/proxs3d.json \
 		$(CURDIR)/debian/proxs3/etc/proxs3/proxs3d.json

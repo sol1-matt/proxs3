@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+TEMPLATE="/usr/share/pve-manager/index.html.tpl"
+
+case "$1" in
+    remove|purge)
+        # Remove our JS script tag from the PVE web UI template
+        if [ -f "$TEMPLATE" ]; then
+            sed -i '/s3storage\.js/d' "$TEMPLATE"
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

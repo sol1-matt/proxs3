@@ -13,6 +13,13 @@ use POSIX qw(SIGTERM SIGHUP);
 my $SOCKET_PATH = '/run/proxs3d.sock';
 my $CRED_DIR = '/etc/pve/priv/proxs3';
 
+# PVE storage plugin API version (must match or be within APIAGE of PVE::Storage::APIVER)
+use constant APIVERSION => 13;
+
+sub api {
+    return APIVERSION;
+}
+
 # Register as storage type 's3'
 sub type {
     return 's3';
@@ -25,6 +32,10 @@ sub plugindata {
             { iso => 1, vztmpl => 1, snippets => 1 },
         ],
         format => [ { raw => 1 } , 'raw' ],
+        'sensitive-properties' => {
+            'access-key' => 1,
+            'secret-key' => 1,
+        },
     };
 }
 
@@ -69,14 +80,15 @@ sub options {
         endpoint     => { optional => 0 },
         bucket       => { optional => 0 },
         region       => { optional => 1 },
-        'access-key' => { optional => 0 },
-        'secret-key' => { optional => 0 },
+        'access-key' => { optional => 1 },
+        'secret-key' => { optional => 1 },
         'use-ssl'    => { optional => 1 },
         'path-style' => { optional => 1 },
         content      => { optional => 1 },
         nodes        => { optional => 1 },
         disable      => { optional => 1 },
         'max-protected-backups' => { optional => 1 },
+        'prune-backups' => { optional => 1 },
     };
 }
 
@@ -177,12 +189,12 @@ sub _uri_encode {
 sub on_add_hook {
     my ($class, $storeid, $scfg, %param) = @_;
 
-    my $access_key = delete $scfg->{'access-key'}
-        or die "access-key is required\n";
-    my $secret_key = delete $scfg->{'secret-key'}
-        or die "secret-key is required\n";
+    my $access_key = $param{'access-key'};
+    my $secret_key = $param{'secret-key'};
 
-    _write_credentials($storeid, $access_key, $secret_key);
+    if ($access_key && $secret_key) {
+        _write_credentials($storeid, $access_key, $secret_key);
+    }
     _reload_daemon();
     return;
 }
@@ -190,8 +202,8 @@ sub on_add_hook {
 sub on_update_hook {
     my ($class, $storeid, $scfg, %param) = @_;
 
-    my $access_key = delete $scfg->{'access-key'};
-    my $secret_key = delete $scfg->{'secret-key'};
+    my $access_key = $param{'access-key'};
+    my $secret_key = $param{'secret-key'};
 
     if ($access_key && $secret_key) {
         _write_credentials($storeid, $access_key, $secret_key);

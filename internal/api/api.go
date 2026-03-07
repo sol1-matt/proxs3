@@ -24,6 +24,7 @@ type Server struct {
 	clients  map[string]*s3client.Client
 	cache    *cache.FileCache
 	health   map[string]bool
+	usage    map[string]int64
 	healthMu sync.RWMutex
 	clientMu sync.RWMutex
 	listener net.Listener
@@ -42,6 +43,7 @@ func New(cfg *config.DaemonConfig) (*Server, error) {
 		clients: make(map[string]*s3client.Client),
 		cache:   fc,
 		health:  make(map[string]bool),
+		usage:   make(map[string]int64),
 	}
 
 	if err := s.initClients(cfg); err != nil {
@@ -150,18 +152,32 @@ func (s *Server) checkAllHealth() {
 	s.clientMu.RUnlock()
 
 	results := make(map[string]bool)
+	usageResults := make(map[string]int64)
 	for id, c := range clients {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := c.HeadBucket(ctx)
-		cancel()
 		results[id] = (err == nil)
 		if err != nil {
 			log.Printf("health check failed for %s: %v", id, err)
+			cancel()
+			continue
+		}
+
+		// Sum object sizes to report used space
+		objects, err := c.ListObjects(ctx, "")
+		cancel()
+		if err == nil {
+			var total int64
+			for _, obj := range objects {
+				total += obj.Size
+			}
+			usageResults[id] = total
 		}
 	}
 
 	s.healthMu.Lock()
 	s.health = results
+	s.usage = usageResults
 	s.healthMu.Unlock()
 }
 
@@ -200,13 +216,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	online := s.health[storageID]
 	s.healthMu.RUnlock()
 
-	// S3 doesn't have real capacity limits, report large values
+	s.healthMu.RLock()
+	used := s.usage[storageID]
+	s.healthMu.RUnlock()
+
+	// S3 has no real capacity limit — report used from actual object sizes
+	// and always show 100 GiB free so PVE never thinks the storage is full
+	const headroom = 107374182400 // 100 GiB
 	resp := StatusResponse{
 		StorageID: storageID,
 		Online:    online,
-		Total:     1099511627776, // 1 TiB placeholder
-		Used:      0,
-		Available: 1099511627776,
+		Total:     used + headroom,
+		Used:      used,
+		Available: headroom,
 	}
 
 	writeJSON(w, resp)
