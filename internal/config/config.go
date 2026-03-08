@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -21,14 +22,15 @@ const (
 
 // StorageConfig represents a discovered S3 storage from storage.cfg.
 type StorageConfig struct {
-	StorageID string
-	Bucket    string
-	Endpoint  string
-	Region    string
-	UseSSL    bool
-	PathStyle bool
-	AccessKey string
-	SecretKey string
+	StorageID   string
+	Bucket      string
+	Endpoint    string
+	Region      string
+	UseSSL      bool
+	PathStyle   bool
+	AccessKey   string
+	SecretKey   string
+	CacheMaxAge int // days; 0 = keep forever
 }
 
 // Credential holds S3 access credentials, loaded from per-storage files.
@@ -183,6 +185,10 @@ func ParseStorageCfg(path string) ([]StorageConfig, error) {
 				current.UseSSL = (val == "1" || val == "yes" || val == "true")
 			case "path-style":
 				current.PathStyle = (val == "1" || val == "yes" || val == "true")
+			case "cache-max-age":
+				if days, err := strconv.Atoi(val); err == nil && days >= 0 {
+					current.CacheMaxAge = days
+				}
 			}
 		}
 	}

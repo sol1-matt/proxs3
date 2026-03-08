@@ -1,3 +1,16 @@
+proxs3 (0.2.0-1) unstable; urgency=medium
+
+  * Multipart upload support for files >5GB (AWS SDK upload manager)
+  * Prevent uploading partial writes (fileInUse /proc/fd check, skip .tmp files)
+  * Per-storage cache-max-age property for automatic local cache eviction
+  * Cache metadata in .meta/ subdirectory (fixes watcher sidecar loop)
+  * activate_volume downloads S3 objects on demand
+  * Graceful degradation when S3 is unreachable (timeouts, stale cache serving)
+  * Endpoint config sanitisation (strip protocol prefix and trailing slash)
+  * Credentials optional for public buckets
+
+ -- Dave Kempe <dave@sol1.com.au>  Sun, 08 Mar 2026 17:00:00 +0000
+
 proxs3 (0.1.0-1) unstable; urgency=medium
 
   * Initial release

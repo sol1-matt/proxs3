@@ -124,6 +124,7 @@ func (s *Server) Start() error {
 
 	go s.healthLoop()
 	go s.watchCacheDirs()
+	go s.cacheAgeLoop()
 
 	return s.server.Serve(ln)
 }
@@ -180,6 +181,34 @@ func (s *Server) checkAllHealth() {
 	s.health = results
 	s.usage = usageResults
 	s.healthMu.Unlock()
+}
+
+func (s *Server) cacheAgeLoop() {
+	// Run every hour
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	// Initial run after short delay
+	time.Sleep(30 * time.Second)
+	s.evictByAge()
+
+	for range ticker.C {
+		s.evictByAge()
+	}
+}
+
+func (s *Server) evictByAge() {
+	for _, sc := range s.cfg.Storages {
+		if sc.CacheMaxAge <= 0 {
+			continue
+		}
+		maxAge := time.Duration(sc.CacheMaxAge) * 24 * time.Hour
+		removed := s.cache.EvictByAge(sc.StorageID, maxAge)
+		if removed > 0 {
+			log.Printf("cache age-evict: removed %d files from %s (max-age %dd)",
+				removed, sc.StorageID, sc.CacheMaxAge)
+		}
+	}
 }
 
 func (s *Server) getClient(storageID string) (*s3client.Client, bool) {

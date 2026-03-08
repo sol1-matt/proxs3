@@ -63,14 +63,26 @@ func (s *Server) watchCacheDirs() {
 					if now.Sub(seen) < 3*time.Second {
 						continue
 					}
-					delete(pending, path)
 
 					// Check file still exists and is a regular file
 					info, err := os.Stat(path)
 					if err != nil || info.IsDir() {
+						delete(pending, path)
 						continue
 					}
 
+					// Skip .tmp files (vzdump writes to .tmp then renames)
+					if strings.HasSuffix(path, ".tmp") {
+						continue
+					}
+
+					// Check no process has the file open (prevents uploading partial writes)
+					if fileInUse(path) {
+						pending[path] = now // reset timer, check again later
+						continue
+					}
+
+					delete(pending, path)
 					go s.uploadNewFile(path)
 				}
 			}
@@ -103,6 +115,38 @@ func (s *Server) addWatchDirs(watcher *fsnotify.Watcher) {
 			}
 		}
 	}
+}
+
+// fileInUse checks if any process has the file open (via /proc).
+// Returns true if the file is still being written to.
+func fileInUse(path string) bool {
+	// Read /proc/*/fd to find open file descriptors pointing to this path
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// Only check numeric dirs (PIDs)
+		pid := entry.Name()
+		if pid[0] < '0' || pid[0] > '9' {
+			continue
+		}
+		fdDir := filepath.Join("/proc", pid, "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			link, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err == nil && link == path {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // uploadNewFile detects the storage ID and S3 key from a local cache path

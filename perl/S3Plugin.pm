@@ -73,6 +73,13 @@ sub properties {
             type        => 'boolean',
             optional    => 1,
         },
+        'cache-max-age' => {
+            description => "Maximum age of cached files in days (0 = keep forever, default). "
+                         . "Useful for backup storages where local cache should be cleaned up after sync.",
+            type        => 'integer',
+            minimum     => 0,
+            optional    => 1,
+        },
     };
 }
 
@@ -89,7 +96,8 @@ sub options {
         nodes        => { optional => 1 },
         disable      => { optional => 1 },
         'max-protected-backups' => { optional => 1 },
-        'prune-backups' => { optional => 1 },
+        'prune-backups'  => { optional => 1 },
+        'cache-max-age'  => { optional => 1 },
     };
 }
 

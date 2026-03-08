@@ -225,6 +225,39 @@ func (fc *FileCache) metaPath(storageID, key string) string {
 	return filepath.Join(fc.baseDir, ".meta", storageID, key+".json")
 }
 
+// EvictByAge removes cached files for a specific storage that are older than maxAge.
+// Only content files are removed (not metadata-only entries).
+func (fc *FileCache) EvictByAge(storageID string, maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	storageDir := filepath.Join(fc.baseDir, storageID)
+	removed := 0
+
+	filepath.Walk(storageDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			fc.mu.Lock()
+			if err := os.Remove(path); err == nil {
+				removed++
+				// Clean up metadata
+				if rel, err := filepath.Rel(fc.baseDir, path); err == nil {
+					os.Remove(filepath.Join(fc.baseDir, ".meta", rel+".json"))
+				}
+				os.Remove(path + ".meta") // legacy cleanup
+				log.Printf("cache age-evict: %s (older than %s)", path, maxAge)
+			}
+			fc.mu.Unlock()
+		}
+		return nil
+	})
+	return removed
+}
+
 type cachedFile struct {
 	path    string
 	size    int64

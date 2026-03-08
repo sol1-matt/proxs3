@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/sol1/proxs3/internal/config"
 )
@@ -141,12 +142,16 @@ func (c *Client) GetObject(ctx context.Context, key string) (*GetObjectResult, e
 }
 
 // PutObject uploads an object from a reader.
+// Uses multipart upload automatically for files larger than 64MB.
 func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, size int64) error {
-	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(c.bucket),
-		Key:           aws.String(key),
-		Body:          body,
-		ContentLength: aws.Int64(size),
+	uploader := manager.NewUploader(c.s3, func(u *manager.Uploader) {
+		u.PartSize = 64 * 1024 * 1024 // 64MB per part
+		u.Concurrency = 4
+	})
+	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Body:   body,
 	})
 	if err != nil {
 		return fmt.Errorf("putting object %s: %w", key, err)
