@@ -1,3 +1,10 @@
+proxs3 (0.2.2-1) unstable; urgency=medium
+
+  * Show S3 bucket@endpoint in PVE Path/Target column instead of cache path
+  * Fix cache_dir query to run safely at activation time, not in polling loop
+
+ -- Dave Kempe <dave@sol1.com.au>  Sun, 09 Mar 2026 14:00:00 +0000
+
 proxs3 (0.2.1-1) unstable; urgency=medium
 
   * Fix cache_dir config being ignored - plugin now queries daemon for

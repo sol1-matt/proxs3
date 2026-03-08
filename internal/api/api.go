@@ -433,9 +433,7 @@ func (s *Server) handlePath(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{
-		"cache_dir": s.cfg.CacheDir,
-	})
+	writeJSON(w, map[string]string{"cache_dir": s.cfg.CacheDir})
 }
 
 // --- Helpers ---
