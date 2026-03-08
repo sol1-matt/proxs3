@@ -3,6 +3,7 @@
 export DH_VERBOSE = 1
 export GOPATH = $(CURDIR)/_build
 export GOCACHE = $(CURDIR)/_build/cache
+export PATH := /usr/local/go/bin:$(PATH)
 
 %:
 	dh $@
