@@ -361,7 +361,11 @@ sub path {
         die "Failed to resolve path for $volname: $@\n";
     }
 
-    return ($res->{path}, undef, $content);
+    # Untaint path from daemon — data over Unix socket is tainted under -T
+    my ($safe_path) = $res->{path} =~ /\A([a-zA-Z0-9._\/-]+)\z/
+        or die "Invalid path from daemon: $res->{path}\n";
+
+    return ($safe_path, undef, $content);
 }
 
 # Upload: called by Proxmox when user uploads an ISO/template via UI or API
