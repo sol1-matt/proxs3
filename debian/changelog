@@ -1,3 +1,9 @@
+proxs3 (0.3.1-1) unstable; urgency=medium
+
+  * Fix taint-mode error in path() when PVE calls qemu-img
+
+ -- Dave Kempe <dave@sol1.com.au>  Sat, 21 Mar 2026 08:53:00 +1100
+
 proxs3 (0.3.0-1) unstable; urgency=medium
 
   * Fix import content type: align S3/cache prefix with PVE expected layout
