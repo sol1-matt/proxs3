@@ -247,8 +247,12 @@ sub check_config {
     my $opts = $self->SUPER::check_config($sectionId, $param, $create, $skipSchemaCheck);
 
     # Set path for PVE's upload flow — must match daemon's cache_dir for large uploads
+    # Untaint: $sectionId and $_cache_dir come from PVE/daemon (tainted under -T),
+    # but PVE's base class uses $scfg->{path} in filesystem_path() → exec (qemu-img).
     my $cache_base = $_cache_dir // $DEFAULT_CACHE_DIR;
-    $opts->{path} = "$cache_base/$sectionId";
+    ($cache_base) = $cache_base =~ /\A([a-zA-Z0-9._\/-]+)\z/ or die "Invalid cache dir: $cache_base\n";
+    (my $safe_sid) = $sectionId =~ /\A([a-zA-Z0-9._-]+)\z/ or die "Invalid storage id: $sectionId\n";
+    $opts->{path} = "$cache_base/$safe_sid";
 
     # Set target so PVE shows the S3 endpoint in the Path/Target column
     my $endpoint = $param->{endpoint} // $opts->{endpoint} // '';
