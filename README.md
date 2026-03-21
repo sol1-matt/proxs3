@@ -1,6 +1,6 @@
 # ProxS3
 
-Native S3 storage plugin for Proxmox VE. Use any S3-compatible object store as a Proxmox storage backend for ISO images, container templates, snippets, and backups.
+Native S3 storage plugin for Proxmox VE. Use any S3-compatible object store as a Proxmox storage backend for ISO images, container templates, VM disk templates, snippets, and backups.
 
 ## Why Not s3fs / rclone mount?
 
@@ -139,6 +139,8 @@ Create a bucket in your S3-compatible store and set up the expected directory st
 | Container templates | `template/cache/` | `template/cache/debian-12-standard_12.2-1_amd64.tar.zst` |
 | Snippets | `snippets/` | `snippets/cloud-init-user.yaml` |
 | Backups | `dump/` | `dump/vzdump-qemu-100-2024_01_01.vma.zst` |
+| Import disk images | `import/` | `import/base-debian12-disk-0.raw` |
+| VM disk images | `images/` | `images/9001/base-9001-disk-0.raw` |
 
 You can create these prefixes by uploading a file to each path, or by creating "folders" in the S3 console. Most S3-compatible stores create prefixes implicitly when you upload objects.
 
@@ -181,7 +183,7 @@ pvesm add s3 my-s3-store \
     --region us-east-1 \
     --access-key AKIAIOSFODNN7EXAMPLE \
     --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-    --content iso,vztmpl,snippets \
+    --content iso,vztmpl,snippets,images \
     --use-ssl 1
 
 # DigitalOcean Spaces example
@@ -248,7 +250,7 @@ You should now see any ISOs or templates you uploaded to the bucket. You can upl
 | `region` | No | S3 region (defaults to `us-east-1`) |
 | `access-key` | No | S3 access key ID (omit for public buckets) |
 | `secret-key` | No | S3 secret access key (omit for public buckets) |
-| `content` | No | Comma-separated content types: `iso`, `vztmpl`, `snippets`, `backup`, `import` |
+| `content` | No | Comma-separated content types: `iso`, `vztmpl`, `snippets`, `backup`, `import`, `images` |
 | `use-ssl` | No | Use HTTPS (`1`) or HTTP (`0`). Defaults to on. |
 | `path-style` | No | URL style (see **Endpoint and URL Style** below) |
 | `cache-max-age` | No | Maximum age of cached files in days. `0` (default) keeps files forever. See **Cache Age Eviction** below. |
@@ -444,9 +446,10 @@ dpkg -i ../proxs3_*.deb
 | Container templates | `vztmpl` | `template/cache/` | LXC container templates |
 | Snippets | `snippets` | `snippets/` | Cloud-init configs, hookscripts |
 | Backups | `backup` | `dump/` | VM/CT backup files |
-| Import (disk images) | `import` | `images/` | Golden images for VM templates |
+| Import (disk images) | `import` | `import/` | Importable disk images via `import-from=` |
+| VM disk images | `images` | `images/` | VM disk templates for cloning (see below) |
 
-Note: ProxS3 does **not** support running VM disk images (`images`) or container rootdirs (`rootdir`) directly from S3. Live VM disks require block-level random access which S3 cannot provide. Use the `import` content type to store golden images that can be copied to local storage to create templates.
+**Note:** ProxS3 does not support running VMs with disks on S3. Live VM disks require block-level random access which S3 cannot provide. Container rootdirs (`rootdir`) are also not supported. The `images` content type is for **template disks that are cloned to local storage** before use — VMs run from the local clone, not from S3 directly.
 
 ## Use Cases
 
@@ -464,17 +467,57 @@ aws s3 cp ubuntu-24.04-live-server-amd64.iso s3://my-bucket/template/iso/
 
 When a node needs an ISO (e.g., to boot a VM installer), ProxS3 downloads it to the local cache on first use. Subsequent uses on the same node are served from cache with an ETag check to ensure freshness. Update an ISO in S3 and every node picks up the new version automatically.
 
-### Golden Images for VM Templates
+### VM Disk Templates (images)
 
-Store base VM disk images in S3 and import them on any node to create templates. This is ideal for maintaining a library of pre-built images (e.g., a hardened Debian base, a pre-configured application stack) that can be deployed across clusters.
+Store VM template disks in S3 and clone them to local storage on any node. This is ideal for maintaining a central library of golden images (e.g., a hardened Debian base, a pre-configured application stack) shared across multiple PVE clusters.
 
 ```bash
-# Upload golden images to the images/ prefix
-aws s3 cp base-debian12-disk-0.raw s3://my-bucket/images/
-aws s3 cp base-ubuntu2404-disk-0.qcow2 s3://my-bucket/images/
+# Upload template disks — preserving the vmid/diskname structure PVE expects
+aws s3 cp base-9001-disk-0.raw s3://my-bucket/images/9001/base-9001-disk-0.raw
 ```
 
-Enable the `import` content type on your S3 storage, then use Proxmox's import functionality to copy disk images to local storage and convert them into templates. The originals stay in S3 as your single source of truth.
+Create a PVE template VM with its disks on S3 storage:
+
+```bash
+pvesm add s3 my-s3-store \
+    --endpoint s3.ap-southeast-2.amazonaws.com \
+    --bucket my-proxmox-images \
+    --region ap-southeast-2 \
+    --content images,iso,vztmpl \
+    --use-ssl 1
+```
+
+Then clone the template to local storage:
+
+```bash
+# Full clone — copies the disk from S3 cache to local storage
+qm clone 9001 200 --name my-new-vm --full --target local-lvm
+```
+
+The first clone on each node downloads the disk from S3 to the local cache. Subsequent clones on the same node are served from cache (validated against S3 via ETag). Update the image in S3 and new clones automatically get the latest version.
+
+**Limitations:**
+- VMs cannot run with disks on S3 — always clone to local storage first
+- Linked clones are not supported (they require random access to the base image)
+- Use `--target` to specify local storage when cloning, or PVE will try to clone within S3
+
+### Golden Images for Import (import)
+
+For a simpler workflow without PVE template VMs, use the `import` content type with PVE's `import-from` syntax:
+
+```bash
+# Upload disk images to the import/ prefix
+aws s3 cp base-debian12-disk-0.raw s3://my-bucket/import/
+```
+
+Then import directly when creating a VM:
+
+```bash
+qm create 200 --name my-new-vm \
+    --scsi0 local-lvm:0,import-from=my-s3-store:import/base-debian12-disk-0.raw
+```
+
+This pulls the disk from S3 and writes it directly to local storage. Use `images` for the template/clone workflow, or `import` for one-shot imports — both work.
 
 ### Shared Container Templates
 
