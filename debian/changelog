@@ -1,3 +1,9 @@
+proxs3 (0.4.1-1) unstable; urgency=medium
+
+  * Implement alloc_image for disk clone support
+
+ -- Dave Kempe <dave@sol1.com.au>  Sat, 21 Mar 2026 12:02:00 +1100
+
 proxs3 (0.4.0-1) unstable; urgency=medium
 
   * Add images content type support for VM disk templates

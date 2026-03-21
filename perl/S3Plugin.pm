@@ -417,7 +417,26 @@ sub clone_image {
 }
 
 sub alloc_image {
-    die "image allocation not supported on S3 storage\n";
+    my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
+
+    $fmt //= 'raw';
+
+    # Build and untaint the images directory path
+    my $cache_base = $_cache_dir // $DEFAULT_CACHE_DIR;
+    ($cache_base) = $cache_base =~ /\A([a-zA-Z0-9._\/-]+)\z/ or die "Invalid cache dir: $cache_base\n";
+    (my $safe_sid) = $storeid =~ /\A([a-zA-Z0-9._-]+)\z/ or die "Invalid storage id: $storeid\n";
+    ($vmid) = $vmid =~ /\A(\d+)\z/ or die "Invalid vmid: $vmid\n";
+    my $imagedir = "$cache_base/$safe_sid/images/$vmid";
+    File::Path::make_path($imagedir);
+
+    if (!$name) {
+        for (my $i = 0; ; $i++) {
+            $name = "vm-$vmid-disk-$i.$fmt";
+            last if ! -e "$imagedir/$name";
+        }
+    }
+
+    return "$vmid/$name";
 }
 
 sub free_image {
