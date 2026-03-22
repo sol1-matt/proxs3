@@ -343,12 +343,17 @@ sub list_volumes {
         next if $@ || !$list || ref($list) ne 'ARRAY';
 
         for my $vol (@$list) {
-            push @volumes, {
+            my $info = {
                 volid   => $vol->{volume},
                 format  => $vol->{format},
                 size    => $vol->{size},
                 content => $ct,
             };
+            # images volnames are "vmid/diskname" — PVE UI needs the vmid field
+            if ($ct eq 'images' && $vol->{volume} =~ m/^[^:]+:(\d+)\//) {
+                $info->{vmid} = $1;
+            }
+            push @volumes, $info;
         }
     }
     return \@volumes;

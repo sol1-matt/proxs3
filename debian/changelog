@@ -1,3 +1,9 @@
+proxs3 (0.4.5-1) unstable; urgency=medium
+
+  * Include vmid in list_volumes for images content type (fixes UI delete)
+
+ -- Dave Kempe <dave@sol1.com.au>  Sun, 22 Mar 2026 15:12:00 +1100
+
 proxs3 (0.4.4-1) unstable; urgency=medium
 
   * Separate path resolution from download — /v1/path no longer triggers S3 download
