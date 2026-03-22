@@ -560,10 +560,21 @@ Templates appear in the Proxmox UI under the S3 storage. When you create a conta
 
 Store cloud-init user-data, network-config, and vendor-data files in S3 for use across the cluster. Keep your infrastructure-as-code configs in one place.
 
+PVE's upload API does not support snippets — this is a PVE limitation, not a ProxS3 one. The standard approach (same as NFS or directory storage) is to write files directly to the storage path:
+
+```bash
+# Write directly to the cache — the watcher uploads to S3 automatically
+cp cloud-init-user.yaml /var/cache/proxs3/my-s3-store/snippets/
+cp network-config.yaml /var/cache/proxs3/my-s3-store/snippets/
+```
+
+Or upload to S3 directly:
+
 ```bash
 aws s3 cp cloud-init-user.yaml s3://my-bucket/snippets/
-aws s3 cp network-config.yaml s3://my-bucket/snippets/
 ```
+
+Either way, the snippets appear in PVE on all nodes. Writing to the cache path is often more convenient since it doesn't require AWS credentials on the node — the daemon handles the S3 upload.
 
 ### Offsite Backups
 
