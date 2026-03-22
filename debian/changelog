@@ -1,3 +1,9 @@
+proxs3 (0.5.1-1) unstable; urgency=medium
+
+  * Fix volume_size_info to match file_size_info return convention
+
+ -- Dave Kempe <dave@sol1.com.au>  Sun, 22 Mar 2026 16:33:00 +1100
+
 proxs3 (0.5.0-1) unstable; urgency=medium
 
   * Implement S3-native template conversion (create_base), clone, and rename

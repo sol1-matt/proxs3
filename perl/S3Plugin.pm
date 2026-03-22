@@ -613,9 +613,9 @@ sub volume_size_info {
         # Untaint for exec
         ($cached) = $cached =~ /\A([a-zA-Z0-9._\/-]+)\z/;
         if ($cached) {
-            my $info = PVE::Storage::Plugin::file_size_info($cached, $timeout);
-            return wantarray ? ($info->{size}, $info->{format}, $info->{used}, $info->{parent}) : $info->{size}
-                if $info && $info->{size};
+            my ($size, $format, $used, $parent) = PVE::Storage::Plugin::file_size_info($cached, $timeout);
+            return wantarray ? ($size, $format, $used, $parent) : $size
+                if $size;
         }
     }
 
