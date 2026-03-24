@@ -1,3 +1,10 @@
+proxs3 (0.6.1-1) unstable; urgency=medium
+
+  * Fix import-from: download file to cache when not present (PR #6, issue #4)
+  * Add configurable part-size-mb for MinIO compatibility (PR #5, issue #3)
+
+ -- Dave Kempe <dave@sol1.com.au>  Wed, 25 Mar 2026 09:51:00 +1100
+
 proxs3 (0.6.0-1) unstable; urgency=medium
 
   * Implement backup protected attribute via S3 object tags
