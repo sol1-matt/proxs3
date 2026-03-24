@@ -382,6 +382,17 @@ sub path {
     my ($safe_path) = $res->{path} =~ /\A([a-zA-Z0-9._\/-]+)\z/
         or die "Invalid path from daemon: $res->{path}\n";
 
+    # If file is not in cache, download it from S3 (GitHub issue #4).
+    # PVE does not call activate_volume() for all content types (e.g. import,
+    # snippets), so path() must ensure the file exists on disk.
+    if (! -e $safe_path) {
+        eval {
+            _daemon_request('/v1/download', { storage => $storeid, key => $key });
+        };
+        # Download failure is not fatal — the file may not exist in S3
+        # (e.g. delete operations). PVE will handle the missing-file error.
+    }
+
     return ($safe_path, undef, $content);
 }
 
